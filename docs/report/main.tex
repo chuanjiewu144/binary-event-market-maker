@@ -1,0 +1,802 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=1.55cm,headheight=14pt,footskip=21pt]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,array,tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{navy}{RGB}{21,48,82}
+\definecolor{lightblue}{RGB}{235,242,250}
+\definecolor{codegreen}{RGB}{20,110,70}
+\definecolor{codegray}{RGB}{90,90,90}
+
+\hypersetup{
+  pdftitle={An Adaptive Market-Making Model for Binary Event Contracts},
+  pdfauthor={Chuanjie Wu},
+  pdfsubject={Quantitative market making, RFQ and FOK execution, model risk and solvency}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Adaptive Binary-Option Market Maker}
+\rhead{Technical Research Report}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{2.5pt}
+\setlist[itemize]{leftmargin=1.5em,itemsep=1pt,topsep=1.5pt}
+\setlist[enumerate]{leftmargin=1.7em,itemsep=1pt,topsep=1.5pt}
+\renewcommand{\arraystretch}{1.08}
+\raggedbottom
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{navy}\bfseries,
+  commentstyle=\color{codegreen},
+  stringstyle=\color{codegray},
+  backgroundcolor=\color{lightblue},
+  frame=single,
+  rulecolor=\color{navy!35},
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  aboveskip=4pt,
+  belowskip=4pt
+}
+
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\Cov}{\operatorname{Cov}}
+\newcommand{\1}{\mathbf{1}}
+\newcommand{\sectionrule}{\vspace{-2pt}\noindent\color{navy}\rule{\textwidth}{0.7pt}\color{black}\vspace{2pt}}
+
+\begin{document}
+\hypersetup{pageanchor=false}
+
+% -----------------------------------------------------------------------------
+% Page 1: title
+% -----------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+\vspace*{1.1cm}
+{\color{navy}\rule{\textwidth}{1.2pt}}\\[1.0cm]
+{\LARGE\bfseries An Adaptive Market-Making Model\\[4pt]
+for Binary Event Contracts\par}
+\vspace{0.55cm}
+{\large RFQ Quoting, FOK Selection, Portfolio Risk,\\
+Adverse Selection and Runtime Engineering\par}
+\vspace{0.8cm}
+{\color{navy}\rule{0.78\textwidth}{0.8pt}}\\[0.9cm]
+{\large Chuanjie Wu\par}
+\vspace{0.25cm}
+{\normalsize Quantitative Research Technical Report\par}
+\vspace{0.2cm}
+{\normalsize 29 August 2026\par}
+
+\vfill
+\begin{minipage}{0.88\textwidth}
+\small
+\textbf{Abstract.}
+This report develops a research-grade market-making framework for binary event
+contracts whose terminal payoff is either zero or one.  The market maker trades
+contracts written on a discrete policy rate (FED) and two correlated private-company
+valuations (AJR and THR).  The framework combines a fitted stochastic factor model,
+analytic and Monte Carlo probability estimation, inventory-aware reservation prices,
+adaptive RFQ spreads, adverse-selection diagnostics, conservative FOK acceptance,
+and exact maximum-loss cash accounting.  The design has two ordered objectives:
+avoid bankruptcy under every admissible execution sequence, then maximise realised
+PnL and competitive rank.  Particular attention is given to the separation between
+RFQs, where the dealer controls price and displayed size but does not observe the
+customer's direction, and FOKs, where direction, price and total size are revealed but
+the dealer can only accept or reject.  A state-level caching architecture reduces
+runtime without changing the economic logic.  The report states assumptions,
+derives the decision rules, maps each rule to implementable Python components, and
+specifies an out-of-sample validation and model-governance protocol.
+
+\vspace{0.5cm}
+\textbf{Keywords:} binary option; event contract; market making; RFQ; fill-or-kill;
+inventory risk; adverse selection; Monte Carlo; solvency; model governance.
+\end{minipage}
+
+\vfill
+{\footnotesize Research prototype for controlled simulation.  It is not investment advice
+and is not represented as a production trading system.}
+\end{titlepage}
+\hypersetup{pageanchor=true}
+\setcounter{page}{2}
+\small
+\setcounter{tocdepth}{1}
+
+% -----------------------------------------------------------------------------
+% Page 2: contents and executive summary
+% -----------------------------------------------------------------------------
+\thispagestyle{fancy}
+\tableofcontents
+\vspace{0.2cm}
+\section*{Executive summary}
+\addcontentsline{toc}{section}{Executive summary}
+\sectionrule
+
+The system prices an option by its estimated probability of paying one.  It then
+separates the trading decision into a \emph{directional centre} and a \emph{risk
+width}.  The directional centre is the reservation price
+\[
+ r=p-\gamma_t C+\theta F,
+\]
+where $p$ is fair value, $C$ is covariance with the existing portfolio,
+$\gamma_t$ is dynamic risk aversion, and $\theta F$ is a learned order-flow
+adjustment.  For an RFQ, the dealer publishes
+\[
+ b=\lfloor r-h\rfloor_{0.01},\qquad
+ a=\lceil r+h\rceil_{0.01},
+\]
+where $h$ aggregates base compensation, estimation uncertainty, binary payoff
+variance, tenor, live volatility, counterparty toxicity and repeat-request risk.
+Displayed quantities are bounded by exact cash capacity and concentration limits.
+
+For a FOK, the customer supplies side, price and total quantity.  The dealer accepts
+only when apparent edge exceeds model, size, toxicity, concentration and short-tenor
+penalties, and when the complete order is solvent under its worst payoff.  Large,
+short-dated FOKs are treated as potentially informed, while ordinary central-probability
+RFQs may be quoted more competitively.  This separation is the central strategic
+contribution: \emph{compete for ordinary flow without applying the same aggressiveness
+to orders that reveal unusually strong information}.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{>{\bfseries}p{2.7cm}X X}
+\toprule
+Channel & Information observed & Primary control \\
+\midrule
+RFQ & Contract and counterparty; customer side remains hidden & Bid, offer and side-specific displayed quantities \\
+FOK & Contract, customer side, price and total quantity & Binary accept/reject subject to full-order risk \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Research standards.}  The model is deterministic conditional on inputs and
+seeds, auditable at every decision, explicit about assumptions, and evaluated using
+walk-forward tests, scenario stress tests, ablations and runtime limits.  Bankruptcy
+prevention is a hard constraint; PnL optimisation is secondary.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 3
+% -----------------------------------------------------------------------------
+\section{Problem definition and market microstructure}
+\sectionrule
+
+\subsection{Binary contracts}
+A binary option $i$ has legs $(w_{i\ell},U_{i\ell})$, strike $K_i$ and expiry
+$T_i$.  Its observable at expiry is
+\[
+ Z_i(T_i)=\sum_{\ell=1}^{L_i}w_{i\ell}U_{i\ell}(T_i),
+\]
+and its cash payoff is
+\[
+ X_i=\1_{\{Z_i(T_i)\ge K_i\}}\in\{0,1\}.
+\]
+Examples include $\1_{\{\mathrm{FED}_{t+1}\ge1.75\}}$,
+$\1_{\{\mathrm{THR}_{t+2}\ge1735\}}$, and
+$\1_{\{\mathrm{THR}_{t+1}-\mathrm{AJR}_{t+1}\ge0\}}$.  With zero interest and
+no separate risk-premium adjustment, the model fair value is the physical-model
+probability
+\[
+ p_i(t)=\E_t[X_i]=\mathbb{P}_t\!\left(Z_i(T_i)\ge K_i\right).
+\]
+This is a modelling convention of the simulated market, not a general statement that
+real-world derivative prices equal physical probabilities.
+
+\subsection{RFQ protocol}
+On an RFQ the exchange requests a two-sided quote
+\[
+ Q_i=(b_i,n_i^b,a_i,n_i^a),\qquad 0\le b_i<a_i\le1.
+\]
+The dealer does not know whether the customer will buy or sell.  If the customer
+sells, high bids are competitive; if the customer buys, low offers are competitive.
+Displayed quantity controls the maximum fill allocated to that side.  Consequently,
+an RFQ decision must price both directions and cannot condition directly on the
+unrevealed customer side.
+
+\subsection{FOK protocol}
+On a fill-or-kill order, the customer provides side $s\in\{\mathrm{BUY},
+\mathrm{SELL}\}$, price $P$, and quantity $q$.  The dealer returns only
+\texttt{True} or \texttt{False}.  It cannot select a smaller quantity.  If several
+dealers accept, the exchange may split the complete customer order according to its
+allocation rule; nevertheless each dealer must be capable of carrying all $q$ because
+the realised allocation is not guaranteed in advance.
+
+\subsection{Sign and cash conventions}
+Let dealer quantity $q_d>0$ denote a purchase and $q_d<0$ a sale.  Worst-case cash
+reserved at execution is
+\[
+ L(q_d,P)=
+ \begin{cases}
+ q_dP,&q_d>0,\\
+ (-q_d)(1-P),&q_d<0.
+ \end{cases}
+\]
+A long contract can lose its purchase price; a short contract can lose one minus its
+sale price.  The internal cash ledger deducts this amount immediately.  At expiry it
+releases the payoff for a long or the unused collateral for a short.  This convention
+mirrors the checker and makes solvency a pathwise property rather than an expectation.
+
+\subsection{Ordered objective}
+The strategy solves a lexicographic problem:
+\begin{enumerate}
+  \item maintain non-negative cash after every trade and settlement, with a buffer;
+  \item conditional on survival, maximise realised PnL and the fraction of competitors
+  outperformed.
+\end{enumerate}
+Expected edge never overrides the hard solvency constraint.  A positive-expectation
+trade can still be rejected if its worst-case loss or concentration is too large.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 4
+% -----------------------------------------------------------------------------
+\section{Stochastic factor model and option valuation}
+\sectionrule
+
+\subsection{FED dynamics}
+Let $R_t$ denote the policy-rate state on a grid with step $\delta_R=0.25$.  Conditional
+on $R_t=r$, the next value is $r+\delta_R$, $r-\delta_R$ (floored at zero), or $r$.
+Mean reversion tilts the base transition probabilities:
+\[
+ \pi_t^{\uparrow}=\clip\!\left(\pi^{\uparrow}+\kappa(R^\star-R_t),0,1\right),
+\]
+\[
+ \pi_t^{\downarrow}=\clip\!\left(\pi^{\downarrow}-\kappa(R^\star-R_t),
+ 0,1-\pi_t^{\uparrow}\right),
+\]
+with $R^\star=2$.  A finite-state recursion prices single-leg FED options exactly and
+avoids Monte Carlo noise.
+
+\subsection{AJR and THR dynamics}
+Let $V_{j,t}$ be company $j\in\{A,H\}$, where $A$ denotes AJR and $H$ denotes THR.
+The one-step log return is
+\[
+ r_{j,t+1}^{\mathrm{company}}
+ :=\log\frac{V_{j,t+1}}{V_{j,t}}
+ =\mu_j+\beta_{j,R}\Delta R_{t+1}
+ +\beta_{j,S}S_{t+1}+\varepsilon_{j,t+1}.
+\]
+The common sector shock and idiosyncratic residuals satisfy
+\[
+ S_{t+1}\sim N(0,\sigma_S^2),\qquad
+ \varepsilon_{j,t+1}\sim N(0,\sigma_{j,\varepsilon}^2),
+\]
+independently across the two residuals and independently of $S$.  Therefore
+\[
+ \Cov(r_{A,t+1},r_{H,t+1}\mid\Delta R_{t+1})
+ =\beta_{A,S}\beta_{H,S}\sigma_S^2.
+\]
+The use of log returns preserves positivity before the simulation's cent rounding and
+turns multiplicative growth into an additive Gaussian factor model.  Conditional on a
+FED path, a single company value is approximately lognormal.  The log ratio
+$\log(V_A/V_H)$ is normal because it is a linear combination of jointly normal log
+returns; this permits fast analytic pricing of zero-strike AJR--THR comparisons.
+
+\subsection{Hybrid pricing engine}
+The live engine selects the cheapest sufficiently accurate method:
+\begin{itemize}
+  \item exact dynamic programming for single-leg FED options;
+  \item conditional lognormal formulae for single AJR or THR legs;
+  \item a conditional normal formula for opposite-sign AJR--THR legs with zero strike;
+  \item deterministic Monte Carlo for unsupported combinations.
+\end{itemize}
+The research configuration uses
+\[
+ N_{\mathrm{live}}=1000,\qquad N_{\mathrm{theo}}=5000.
+\]
+The first controls live fallback pricing; the second is reserved for the independent
+theoretical-pricing interface.  Each simulation seed is a deterministic function of
+parameters, option and state.  Repeated calls therefore return identical probabilities,
+which is essential for attribution and debugging.
+
+\subsection{Pricing limitations}
+The fitted dynamics are deliberately parsimonious.  They omit jumps, stochastic
+volatility, regime changes, endogenous market impact and a separate risk-neutral
+measure.  Daily cent rounding also makes analytic lognormal formulae approximate for
+some contracts.  These limitations enter execution through model-error and volatility
+buffers rather than being hidden.  Production deployment would require independent
+calibration validation and monitoring for structural breaks.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 5
+% -----------------------------------------------------------------------------
+\section{Rolling calibration and uncertainty control}
+\sectionrule
+
+\subsection{History window and exponential weighting}
+The calibration consumes only history actually supplied before trading.  It never
+assumes that 60 or 200 observations exist.  The maximum window is
+$W=60$ observations and the effective half-life is
+\[
+ H=\min\{20,\max(5,(N-1)/2)\}.
+\]
+With decay $\lambda=\exp(-\log2/H)$, observation $k$ receives weight proportional to
+$\lambda^{N-1-k}$.  The method therefore adapts rapidly under short burn-in while
+retaining stability when more data are available.
+
+\subsection{Rate and company estimation}
+Weighted up/down indicators estimate the FED transition probabilities.  Regressing the
+difference between up and down indicators on $R^\star-R_t$ estimates the mean-reversion
+coefficient $\kappa$.  Company log returns are fitted by weighted least squares:
+\[
+ r_{j,t+1}=\mu_j+\beta_{j,R}\Delta R_{t+1}+e_{j,t+1}.
+\]
+The weighted residual variances and covariance form
+\[
+ \Sigma_e=
+ \begin{pmatrix}
+ \sigma_A^2&\sigma_{AH}\\
+ \sigma_{AH}&\sigma_H^2
+ \end{pmatrix}.
+\]
+A one-factor decomposition chooses sector loadings reproducing $\sigma_{AH}$ and
+assigns the remaining non-negative variance to idiosyncratic shocks.  Since only the
+products $\beta_{j,S}\sigma_S$ are identifiable, the implementation normalises
+$\sigma_S=1$.
+
+\subsection{Shrinkage toward a prior}
+Short samples are noisy.  With prior sample size $N_0=30$, the empirical weight is
+\[
+ w_N=\frac{N}{N+N_0}.
+\]
+Transition probabilities, mean reversion and residual variances are blended with
+conservative defaults.  Drifts and rate betas are multiplied by $w_N$.  This reduces
+overfitting without imposing a fictitious 200-day history.
+
+\subsection{Estimation-uncertainty spread}
+For fair value $p$, the heuristic standard error is
+\[
+ \operatorname{SE}(p)=
+ \sqrt{\frac{\max\{p(1-p),0.01\}}{\max\{N,25\}}}.
+\]
+The quote adds $a_{\mathrm{model}}\operatorname{SE}(p)$ to its half-spread, with
+$a_{\mathrm{model}}=0.25$ in the competitive RFQ configuration.  At $p=0.5$ and
+$N=25$, this term is $0.025$; at $N=100$, it falls to $0.0125$.  Thus uncertainty
+declines smoothly with evidence, but never disappears at extreme probabilities.
+
+\subsection{Live volatility and markouts}
+For each payoff-exposure key, the system records one-step changes in live fair value,
+excluding terminal zero/one jumps.  After at least three observations,
+\[
+ \widehat\sigma_{\mathrm{live}}
+ =\frac{n}{n+8}\sqrt{\frac1n\sum_{k=1}^{n}(\Delta p_k)^2},
+\]
+clipped at $0.06$.  The spread contribution is
+$\min\{0.02,0.35\widehat\sigma_{\mathrm{live}}\}$.  Execution markouts are also
+recorded by counterparty and payoff key.  A negative direction-adjusted markout means
+the market moved in the customer's favour and supplies evidence of adverse selection.
+
+\subsection{Calibration governance}
+All fitted parameters, window lengths and priors should be logged at each step.  Alerts
+should cover probabilities at constraints, covariance matrices near singularity,
+large parameter jumps and systematic forecast miscalibration.  Research changes must
+be tested out of sample; hidden-test scores are not themselves a statistically valid
+calibration objective.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 6
+% -----------------------------------------------------------------------------
+\section{RFQ pricing: reservation price and adaptive spread}
+\sectionrule
+
+\subsection{Inventory-aware centre}
+Let $X$ be the candidate payoff and let the active portfolio be
+$\Pi=\sum_jq_jX_j$.  The relevant covariance is
+\[
+ C=\Cov(X,\Pi)=\sum_jq_j\Cov(X,X_j).
+\]
+Dynamic risk aversion is
+\[
+ \gamma_t=\clip\!\left(
+ \gamma_0[1+2D_t+0.75U_t+2L_t],0.01,0.10\right),
+\]
+where $D_t$ is realised drawdown, $U_t$ is collateral utilisation and $L_t$ is a
+recent-negative-PnL fraction.  With $\gamma_0=0.03$, define
+\[
+ s_t^{\mathrm{inv}}=\clip(\gamma_tC,-0.12,0.12).
+\]
+Positive covariance with a long portfolio lowers the centre, discouraging more buying
+and encouraging sales; negative covariance recognises hedging benefit.
+
+\subsection{Learned flow adjustment}
+For each payoff key the system fits
+\[
+ \Delta p_{t+1}=\alpha+\theta F_t+\eta_{t+1},
+\]
+shrinks $\theta$ toward zero and clips it to $[-0.03,0.03]$.  Customer buying creates
+positive $F_t$; selling creates negative $F_t$; the signal decays by one half at each
+step.  The price adjustment is $\clip(\theta F_t,-0.02,0.02)$.  The reservation price
+is consequently
+\[
+ r=\clip\!\left(p-s_t^{\mathrm{inv}}+\clip(\theta F_t,-0.02,0.02),0,1\right).
+\]
+Inventory and flow move both bid and offer in the same direction; they do not merely
+widen the quote.
+
+\subsection{Half-spread decomposition}
+The symmetric risk width is
+\[
+\begin{aligned}
+ h=\clip\bigl(&h_{0,t}
+ +a_m\operatorname{SE}(p)
+ +a_vp(1-p)
+ +a_T\min(\sqrt{T},3)\\
+ &+a_{\tau}\tau
+ +\min(0.02,0.35\widehat\sigma_{\mathrm{live}})
+ +h_{\mathrm{repeat}},\ 0.01,h_{\max}\bigr).
+\end{aligned}
+\]
+The recommended research settings are
+\[
+ h_0=0.01,\quad a_m=0.25,\quad a_v=0.01,\quad
+ a_T=0.002,\quad a_{\tau}=1,
+\]
+with adaptive-base range $[0.01,0.04]$ and final cap $h_{\max}=0.06$.  The repeat
+penalty is $\min\{0.015,0.003(m-1)_+\}$ for the $m$th request from the same
+counterparty during a step.
+
+Counterparty toxicity blends global and payoff-specific adverse markouts:
+\[
+ \tau=\clip(0.25\tau_{\mathrm{global}}+0.75\tau_{\mathrm{specific}},0,0.10),
+\]
+where both components are shrunk toward zero under limited observations.  Toxicity
+widens both sides because an RFQ does not reveal which side the customer will choose.
+
+\subsection{Penny-grid construction}
+Raw prices are $r-h$ and $r+h$.  The dealer rounds outward:
+\[
+ b=\max\{0,\min(0.99,\lfloor100(r-h)\rfloor/100)\},
+\]
+\[
+ a=\min\{1,\max(0.01,\lceil100(r+h)\rceil/100)\}.
+\]
+Outward rounding never silently reduces the intended protection.  For $r=0.5823$ and
+$h=0.06$, one obtains $b=0.52$ and $a=0.65$.  A selective competitive rule may cap
+$h$ at $0.03$ when $0.2\le p\le0.8$, measured toxicity is at most $0.02$, and
+$|q_i|\le5$; this would give approximately $0.55/0.62$.  The override must not be
+applied to toxic counterparties or concentrated inventories.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 7
+% -----------------------------------------------------------------------------
+\section{RFQ size, tail protection and adaptive behaviour}
+\sectionrule
+
+\subsection{Worst loss per displayed contract}
+At bid $b$, buying one contract has worst loss $\ell_b=b$.  At offer $a$, selling one
+has worst loss $\ell_a=1-a$.  Let
+\[
+ B_t=f_t^{\mathrm{buffer}}C_0,\qquad F_t=(C_t-B_t)_+,
+\]
+where $C_0$ is initial capital, $C_t$ is internal free cash and
+$f_t^{\mathrm{buffer}}\ge0.15$ rises with drawdown, utilisation and recent loss.  Cash
+capacity is $\lfloor F_t/\ell\rfloor$ for positive $\ell$.
+
+The target per-fill risk budget is
+\[
+ R_t=\min\{0.18C_0,0.30F_t\},
+\]
+in the aggressive RFQ configuration.  Target quantity is approximately
+$\max\{1,\lfloor R_t/\ell\rfloor\}$, scaled downward by toxicity and a dynamic risk
+scale.  The final displayed size is the minimum of target size, cash capacity, the
+maximum quote size (30), and per-option, underlying and gross-position capacity.
+
+\subsection{Risk-reducing priority}
+A sale against an existing long position, or a purchase against an existing short
+position, reduces net economic exposure.  The size logic therefore permits enough
+quantity to flatten the position when possible.  Nevertheless, the trade still passes
+cash capacity because the simulated exchange reserves maximum loss trade by trade and
+does not net collateral automatically.
+
+\subsection{Directional tail protection}
+Model error is particularly consequential when a customer asks the dealer to take the
+unlikely side of an extreme-probability event.  The recommended overlay is
+\begin{lstlisting}
+if fair_value < 0.20 and current_inventory >= 0:
+    bid_quantity = max(1, int(0.40 * bid_quantity))
+
+if fair_value > 0.80 and current_inventory <= 0:
+    offer_quantity = max(1, int(0.40 * offer_quantity))
+\end{lstlisting}
+At low $p$, the dangerous side is buying; at high $p$, the dangerous side is selling.
+The opposite side is not reduced because it either takes the statistically favourable
+payoff direction or decreases an existing position.
+
+\subsection{Adaptive base spread}
+After each step the base half-spread changes by
+\[
+ \Delta h_{0,t}=0.04(-\overline m_t)
+ +0.003(\overline f_t-0.30)+0.005L_t,
+\]
+where $\overline m_t$ is average direction-adjusted information markout and
+$\overline f_t$ is average fill rate.  Adverse markouts, excessive fills and negative
+PnL widen the base.  Favourable markouts and very low participation narrow it.  The
+update is deliberately slow and clipped to avoid instability.
+
+\subsection{RFQ algorithm}
+\begin{enumerate}
+  \item Price the contract and retrieve portfolio covariance, flow and toxicity.
+  \item Compute reservation price $r$ and half-spread $h$.
+  \item Apply the central-probability competitive cap only under low toxicity and
+  small inventory.
+  \item Round bid downward and offer upward to whole pennies.
+  \item Compute side-specific quantities from worst loss, free cash and hard limits.
+  \item Reduce dangerous tail-side quantity; preserve risk-reducing capacity.
+  \item If one side has zero capacity, quote the zero-worst-loss boundary price with
+  minimum legal size: bid zero or offer one.
+\end{enumerate}
+
+The design is intentionally asymmetric: aggressiveness is concentrated where the
+estimated event probability is central and risk can be diversified; extreme tail
+exposure is acquired slowly.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 8
+% -----------------------------------------------------------------------------
+\section{FOK acceptance and adverse-selection protection}
+\sectionrule
+
+\subsection{Raw edge}
+For a customer BUY, the dealer sells at $P$ and has raw edge
+\[
+ e_{\mathrm{raw}}=P-r,\qquad L_{\max}=q(1-P).
+\]
+For a customer SELL, the dealer buys and has
+\[
+ e_{\mathrm{raw}}=r-P,\qquad L_{\max}=qP.
+\]
+Using the reservation price rather than unadjusted fair value incorporates the marginal
+effect on the existing portfolio.
+
+\subsection{Information hurdle}
+The base required edge is
+\[
+\begin{aligned}
+ e_{\mathrm{req}}=\clip\bigl(&e_0
+ +a_q\min(\sqrt q,4)
+ +0.75\tau
+ +a_m^{F}\operatorname{SE}(p)\\
+ &+\min(0.015,0.25\widehat\sigma_{\mathrm{live}})
+ +h_{\mathrm{repeat}},\ e_0,e_{\max}\bigr).
+\end{aligned}
+\]
+The conservative settings are
+\[
+ e_0=0.015,\quad a_q=0.010,\quad a_m^F=0.40,\quad e_{\max}=0.20.
+\]
+Increasing $e_{\max}$ alone does not widen the hurdle; it only allows the sum of
+other penalties to exceed the previous cap.
+
+Large orders receive an additional concentration charge
+\[
+ e_{\mathrm{conc}}=\min\{0.15,\gamma_tq\,p(1-p)\},
+\]
+and short maturities receive
+\[
+ e_{\mathrm{short}}=\min\left\{0.03,
+ \frac{0.03}{\max(T,1)}\right\}.
+\]
+The economic acceptance test is
+\[
+ e_{\mathrm{raw}}\ge e_{\mathrm{req}}+e_{\mathrm{conc}}+e_{\mathrm{short}}.
+\]
+This treats large one-day FOKs as potentially informed even when the counterparty has
+no prior toxicity history.
+
+\subsection{Solvency and concentration gates}
+Let $B_t$ be the dynamic cash buffer.  Affordability requires
+\[
+ C_t-L_{\max}\ge B_t.
+\]
+For a risk-increasing FOK, the separate loss budget is
+\[
+ L_{\mathrm{budget}}
+ =\min\{(C_t-B_t)_+,0.08C_0\}.
+\]
+A fully risk-reducing order may use up to $0.12C_0$, but still must pass affordability
+and hard position limits.  The final rule is
+\[
+ \boxed{\mathrm{accept}=\mathrm{attractive}\wedge\mathrm{affordable}
+ \wedge\mathrm{within\ limits}\wedge\mathrm{within\ loss\ budget}.}
+\]
+
+\subsection{Interpretation of observed behaviour}
+Consider selling 17 contracts at $0.78$.  The maximum loss is
+$17(1-0.78)=3.74$.  With $C_0=40$ and an eight-percent risk-increasing budget, the
+limit is $3.20$, so the order is rejected even before considering information risk.
+Selling two contracts at $0.99$ risks only $0.02$ and may remain acceptable when edge
+is strong.  This illustrates the desired nonlinearity: contract count alone is not
+risk, and notional price alone is not risk; the relevant quantity is payoff-contingent
+maximum loss combined with information quality.
+
+\subsection{FOK implementation skeleton}
+\begin{lstlisting}
+accepted = (
+    raw_edge >= required_edge
+                + concentration_charge
+                + short_tenor_penalty
+    and cash_balance - maximum_loss >= buffer
+    and position_capacity >= order.quantity
+    and maximum_loss <= loss_budget
+)
+return accepted
+\end{lstlisting}
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 9
+% -----------------------------------------------------------------------------
+\section{Solvency, portfolio controls and runtime architecture}
+\sectionrule
+
+\subsection{Exact maximum-loss ledger}
+Every fill changes internal cash immediately.  For dealer purchase quantity $q>0$,
+\[
+ C_{t+}=C_t-qP.
+\]
+For dealer sale quantity $-q<0$,
+\[
+ C_{t+}=C_t-q(1-P).
+\]
+At expiry with payoff $X\in\{0,1\}$, a long receives $qX$ and a short recovers
+$q(1-X)$.  Settlement can only increase reserved cash, whereas execution reduces it.
+The hard affordability gate is therefore applied before every voluntary FOK and is
+embedded in RFQ displayed-size capacity.
+
+\subsection{Layered risk controls}
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash\bfseries}p{3.0cm}p{2.6cm}X}
+\toprule
+Control & Research setting & Function \\
+\midrule
+Cash buffer & $\ge15\%$ of initial capital & Preserves liquidity under consecutive one-sided fills \\
+Per-option cap & 200 contracts & Emergency protection against single-event concentration \\
+Underlying cap & 300 contracts & Limits common AJR, THR or FED factor exposure \\
+Gross cap & 500 contracts & Bounds total operational exposure \\
+Maximum quote size & 30 contracts & Limits any individual RFQ allocation \\
+FOK loss budget & $8\%$ risk-increasing & Rejects large all-or-nothing downside \\
+Dynamic risk scale & $[0.40,1]$ & Reduces displayed size after loss or high utilisation \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Contract caps are backstops, not substitutes for price-sensitive cash control.  Buying
+25 contracts at $0.01$ risks $0.25$, while buying 25 at $0.99$ risks $24.75$; a single
+hard count treats economically different positions as identical.
+
+\subsection{Fast state-level covariance}
+The original implementation repeatedly simulated portfolio covariance after each
+fill, although the underlying state and fitted parameters had not changed.  The fast
+architecture generates $N_{\mathrm{cov}}=500$ common market paths once per state and
+stores each option's sampled binary payoff as an integer bitset.  If $B_X$ and $B_Y$
+are payoff bitsets, then
+\[
+ \widehat{\E}[XY]=\frac{\operatorname{bitcount}(B_X\mathbin{\&}B_Y)}{N_{\mathrm{cov}}}.
+\]
+Pair covariance is obtained from this joint mean and the two bit counts, and portfolio
+covariance is a fast weighted sum.  A trade changes $q_j$ but not the simulated joint
+distribution, so it must not invalidate scenario or fair-value caches.  Caches are
+cleared only when the market state or fitted model changes.
+
+Reducing covariance paths from 1500 to 500 triples the speed of scenario generation
+but increases Monte Carlo standard error by $\sqrt3$.  The cache changes the more
+important dimension: simulation cost is paid once per market state rather than once
+per order or fill.  Live prices are similarly cached by immutable option within the
+state.  The separate theoretical test retains its own deterministic sample count.
+
+\subsection{Operational safeguards}
+Production-style controls should include bounded logging, latency counters, cache-hit
+rates, exception isolation, invariant checks ($0\le b<a\le1$ and positive sizes), and
+a deterministic replay facility.  Debug printing must be disabled in scored or live
+sessions because unbounded output can itself cause operational failure.
+
+\clearpage
+
+% -----------------------------------------------------------------------------
+% Page 10
+% -----------------------------------------------------------------------------
+\section{Evaluation, governance and conclusions}
+\sectionrule
+
+\subsection{Validation protocol}
+A credible evaluation separates parameter fitting from performance assessment.
+Recommended evidence includes:
+\begin{enumerate}
+  \item \textbf{Walk-forward tests:} fit only on data available before each session;
+  never use future outcomes to tune a contemporaneous quote.
+  \item \textbf{Competitor diversity:} evaluate against fixed-width, inactive,
+  inventory-aware and situational strategies, with randomised order sequences.
+  \item \textbf{Ablations:} remove covariance, toxicity, flow, adaptive spread and FOK
+  penalties one at a time to identify genuine contribution.
+  \item \textbf{Stress tests:} long one-sided RFQ flow, repeated toxic counterparties,
+  correlated expiries, probabilities near zero/one, small starting capital, and maximum
+  order sizes.
+  \item \textbf{Runtime tests:} record decision latency, simulation calls and total
+  session time separately from PnL.
+\end{enumerate}
+
+Primary metrics are bankruptcy frequency, minimum cash, maximum drawdown, realised
+PnL, rank, fill rate, spread capture, one-step markout, tail loss, exposure by factor,
+FOK acceptance by size/tenor, and runtime percentiles.  Passing a runtime limit only
+means the strategy completed; it does not create a PnL score.  Conversely, a
+non-bankrupt strategy can receive a low score if it beats no competitor.
+
+\subsection{Parameter governance}
+The displayed constants are research starting points, not universal optima.  Each
+change should have an economic hypothesis and an acceptance criterion.  For example,
+tightening the central RFQ spread should increase competitive fills without worsening
+adverse markouts beyond a pre-specified threshold.  Reducing the FOK loss fraction
+should lower tail loss without eliminating all high-edge small orders.  Multiple
+parameters should not be changed simultaneously when attribution matters.
+
+Model versions should record code hash, parameter set, random-seed convention, training
+window, test set and exception logs.  An independent reviewer should challenge model
+assumptions, probability calibration, covariance estimation, collateral accounting and
+the possibility that counterparties condition orders on information absent from the
+model.
+
+\subsection{Conclusion}
+The proposed market maker is organised around three principles.  First, price and risk
+are distinct: fair value estimates the event probability, the reservation price manages
+directional exposure, and the spread compensates for uncertainty and information risk.
+Second, execution protocols require different behaviour: ordinary central-probability
+RFQs may justify aggressive two-sided competition, while revealed-side FOKs require
+size, concentration and short-tenor penalties.  Third, solvency is pathwise: every
+accepted order must be affordable under its worst payoff, irrespective of expected
+edge.  State-level caching makes this discipline computationally feasible without
+removing the economic controls.
+
+The framework remains a research prototype.  Its next development priorities are
+probability-calibration diagnostics, explicit regime detection, uncertainty intervals
+for portfolio covariance, and walk-forward optimisation of RFQ aggressiveness subject
+to a hard bankruptcy constraint.
+
+\vspace{2pt}
+{\small
+\begin{thebibliography}{9}
+\setlength{\itemsep}{0pt}
+\bibitem{avellaneda}
+M.~Avellaneda and S.~Stoikov, ``High-frequency trading in a limit order book,''
+\emph{Quantitative Finance}, 8(3), 217--224, 2008.
+\bibitem{glosten}
+L.~R.~Glosten and P.~R.~Milgrom, ``Bid, ask and transaction prices in a specialist
+market with heterogeneously informed traders,'' \emph{Journal of Financial Economics},
+14(1), 71--100, 1985.
+\bibitem{ho-stoll}
+T.~Ho and H.~R.~Stoll, ``Optimal dealer pricing under transactions and return
+uncertainty,'' \emph{Journal of Financial Economics}, 9(1), 47--73, 1981.
+\bibitem{glasserman}
+P.~Glasserman, \emph{Monte Carlo Methods in Financial Engineering}, Springer, 2004.
+\bibitem{gueant}
+O.~Gu\'eant, C.-A.~Lehalle and J.~Fernandez-Tapia, ``Dealing with the inventory risk,''
+\emph{Mathematics and Financial Economics}, 7, 477--507, 2013.
+\end{thebibliography}
+}
+
+\end{document}
